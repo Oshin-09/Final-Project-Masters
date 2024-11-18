@@ -166,3 +166,92 @@ def register_callback(app):
 
             # Return the 3D surface plot figure and display style for controls
             return fig_surface, {'display': 'block'}
+
+
+
+
+""" @app.callback(
+    Output('z-score-heatmap', 'figure'),
+    [Input('ct-scan-data-store', 'data'),
+     Input('tissue-dropdown', 'value'),
+     Input('hu-threshold-slider', 'value')])  
+    def update_z_score(data, selected_tissues, hu_threshold):
+        if data is None or not selected_tissues:
+            return go.Figure()
+        
+        df = pd.DataFrame(data)
+
+        # Convert data types for all columns
+        df = df.infer_objects(copy=False)
+
+        # Ensure selected_tissues is a list
+        if not isinstance(selected_tissues, list):
+            selected_tissues = [selected_tissues]
+
+        # Filter columns that match the selected tissues
+        tissue_filter = '|'.join([re.escape(tissue) for tissue in selected_tissues])
+        filtered_columns = df.columns[df.columns.str.contains(tissue_filter, regex=True)]
+
+        if len(filtered_columns) == 0:
+            return go.Figure()
+
+        # Select only numeric columns for Z-score calculation
+        numeric_columns = df[filtered_columns].select_dtypes(include=['number']).columns
+        filtered_data = df[numeric_columns]
+
+        # Drop rows with NA values in the selected numeric columns
+        filtered_data = filtered_data.dropna()
+
+        # Ensure Patient IDs align with the filtered data after dropping NA rows
+        patient_ids = df['PatientID'].loc[filtered_data.index].values
+
+        # Apply HU threshold range filtering
+        hu_min, hu_max = hu_threshold
+        filtered_data = filtered_data[(filtered_data >= hu_min) & (filtered_data <= hu_max)]
+
+        # Calculate Z-scores and clip extreme values
+        z_scores = (filtered_data - filtered_data.mean()) / filtered_data.std()
+        z_scores_clipped = z_scores.clip(lower=-5, upper=5)
+
+        # Highlight Z-scores above threshold
+        z_threshold = 0
+        z_scores_highlighted = z_scores_clipped.map(lambda x: x if abs(x) > z_threshold else None)
+
+        # Retrieve tissue names for the y-axis
+        tissue_names = [parse_column_name(col)[1] for col in filtered_columns]
+
+        # Create Z-Score heatmap
+        z_score_fig = px.imshow(
+            z_scores_highlighted.T, 
+            labels={'x': 'Patient ID', 'y': 'Tissue Type', 'z': 'Z-Score'},
+            title='Z-Score Heatmap Grouped by Tissue Type',
+            x=patient_ids,
+            color_continuous_scale='RdBu',
+            aspect="auto"
+        )
+
+        z_score_fig.update_yaxes(
+            title_text='Tissue Selection',
+            tickvals=list(range(len(filtered_columns))),
+            ticktext=tissue_names,
+            tickfont=dict(color='black')  
+        )
+        z_score_fig.update_traces(
+            hovertemplate=(
+                "<b>Patient ID:</b> %{x}<br>" +
+                "<b>Tissue Type:</b> %{y}<br>" +
+                "<b>Z-Score:</b> %{z:.2f}<br>"
+            )
+        )
+
+        z_score_fig.update_layout(
+            xaxis_title='Patient',
+            yaxis_title='Tissue',
+            autosize=True,
+            margin=dict(l=20, r=20, t=50, b=50),
+            height=800,
+            width=1200
+        )
+
+        return z_score_fig
+"""

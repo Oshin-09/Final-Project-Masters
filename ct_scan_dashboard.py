@@ -10,6 +10,10 @@ import numpy as np
 import re
 from sklearn.cluster import KMeans
 import scipy.stats as stats
+from plotly.subplots import make_subplots
+from plotly.graph_objs import Histogram, Scatter
+from dash.dash_table import DataTable
+
 
 # Helper function to generate left/right variants for tissues
 def generate_tissue_variants(base_name, sides=['L', 'R']):
@@ -177,8 +181,19 @@ ct_scan_layout = html.Div([
     dcc.Tabs([
         
         dcc.Tab(label='HU Distribution Patterns', children=[
-            # Heatmap display area
-            dcc.Graph(id='hu-distribution-plot', style={'margin-top': '30px'})
+            # Data Preview Area
+            html.Div([
+                html.H3("Uploaded Data Preview", style={'text-align': 'center'}),
+                DataTable(
+                    id='data-preview-table',
+                    style_table={'overflowX': 'auto', 'margin-top': '20px'},
+                    style_cell={'textAlign': 'left', 'padding': '10px', 'minWidth': '50px', 'width': '100px', 'maxWidth': '200px'},
+                    style_header={'backgroundColor': 'lightgrey', 'fontWeight': 'bold'},
+                    
+                    
+        )
+    ]),
+
         ]),
         dcc.Tab(label='Time-Series Analysis', children=[
             html.Div([
@@ -232,7 +247,7 @@ def parse_file(contents, filename):
         df = pd.read_excel(io.BytesIO(decoded))
     else:
         return None  # Unsupported file format
-    
+    df.replace('NA', pd.NA, inplace=True)
     df = df.dropna(axis=1, how='any')
     
     return df.to_dict('records')
@@ -294,6 +309,25 @@ def register_callbacks(app):
         # Use parse_file to handle data extraction
         parsed_data = parse_file(contents, filename)
         return parsed_data 
+   
+    @app.callback(
+    Output('data-preview-table', 'data'),
+    Output('data-preview-table', 'columns'),
+    Input('ct-scan-data-store', 'data')
+    )
+    def update_data_preview(data):
+        if data is None:
+            return [], []
+
+        # Convert the data to a DataFrame
+        df = pd.DataFrame(data)
+
+        # Create a list of column definitions for the DataTable
+        columns = [{'name': col, 'id': col} for col in df.columns]
+
+        # Return the first 10 rows of the DataFrame as a list of dictionaries
+        return df.to_dict('records'), columns
+
 
     # Heatmap & Distribution Plot callback
     @app.callback(
@@ -353,56 +387,114 @@ def register_callbacks(app):
         )
 
         return hist_fig
-
     # Time-Series Analysis callback
     @app.callback(
-        Output('time-series-plot', 'figure'),
-        [Input('ct-scan-data-store', 'data'),
-        Input('tissue-dropdown', 'value')] )
-    def update_time_series_plot(data, selected_tissues):
-        if data is None or not selected_tissues:
+    Output('time-series-plot', 'figure'),
+    [
+        Input('ct-scan-data-store', 'data'),
+        Input('tissue-dropdown', 'value'),
+        Input('slab-dropdown', 'value'),
+        Input('hu-metric-radio', 'value')
+    ]
+)
+    def update_time_series_plot(data, selected_tissues, selected_slabs, HU_selected_metric):
+        if not data or not selected_tissues or not HU_selected_metric:
             return go.Figure()
 
+        # Load data into DataFrame
         df = pd.DataFrame(data)
-    
-       
-        if 'SeriesDate' not in df.columns:
+
+        # Ensure required columns exist
+        if 'PatientID' not in df.columns or 'SeriesDate' not in df.columns:
+            print("Missing required columns.")
             return go.Figure()
-        
-        df['SeriesDate'] = df['SeriesDate'].astype(str).str.slice(0, 4) + '/' + \
-                   df['SeriesDate'].astype(str).str.slice(4, 6) + '/' + \
-                   df['SeriesDate'].astype(str).str.slice(6, 8)
 
-        # Convert 'Timestamp' column to datetime format
-        df['SeriesDate'] = pd.to_datetime(df['SeriesDate'], errors='coerce')
+        # Convert SeriesDate to datetime and sort by PatientID and SeriesDate
+        df['SeriesDate'] = pd.to_datetime(df['SeriesDate'], format='%Y%m%d', errors='coerce')
+        df.sort_values(by=['PatientID', 'SeriesDate'], inplace=True)
 
-        # Ensure selected_tissues is a list
-        if not isinstance(selected_tissues, list):
-            selected_tissues = [selected_tissues]
-
-        # Filter columns that match the selected tissues
-        tissue_filter = '|'.join([re.escape(tissue) for tissue in selected_tissues])
-        filtered_columns = df.columns[df.columns.str.contains(tissue_filter, regex=True)]
-
-        # Ensure we have columns to plot
-        if filtered_columns.empty:
-            return go.Figure()
-    
-        # Create a time-series plot
-        filtered_data = df[['SeriesDate'] + list(filtered_columns)]
-        time_series_fig = px.line(
-            filtered_data, x='SeriesDate', y=filtered_columns[0],
-            title='Time-Series Analysis of HU Values'
+        # Filter relevant columns based on dropdown selections
+        column_filter = (
+            df.columns.str.contains('|'.join(selected_tissues)) &
+            df.columns.str.contains('|'.join(selected_slabs)) &
+            df.columns.str.contains(HU_selected_metric)
         )
-        time_series_fig.update_layout(
-            xaxis_title='Time', yaxis_title='HU Value',
-            autosize=False, 
-            margin=dict(l=20, r=20, t=50, b=50),  
-            height=800,  
-            width=1400,   
-    )
-        return time_series_fig
-    
+        filtered_columns = df.columns[column_filter]
+
+        if filtered_columns.empty:
+            print("No matching columns for the selected filters.")
+            return go.Figure()
+
+        # Extract and flatten HU values for the histogram and time-series
+        filtered_data = df[filtered_columns].apply(pd.to_numeric, errors='coerce').astype(float)
+        hu_values = filtered_data.values.flatten()
+        hu_values = hu_values[~pd.isna(hu_values)]  # Remove NaN values
+
+        # Align HU values with PatientID and SeriesDate
+        expanded_df = pd.DataFrame({
+            'HU_Value': hu_values,
+            'SeriesDate': df['SeriesDate'].repeat(filtered_columns.shape[0]).reset_index(drop=True),
+            'PatientID': df['PatientID'].repeat(filtered_columns.shape[0]).reset_index(drop=True),
+        })
+
+
+
+        # Create the histogram
+        hist_fig = px.histogram(
+            x=hu_values,
+            nbins=50,
+            title=f'{HU_selected_metric} Distribution',
+            labels={'x': f'{HU_selected_metric}', 'y': 'Frequency'},
+            marginal='rug',
+            opacity=0.7,
+            color_discrete_sequence=['blue']
+        )
+
+        # Create the time-series plot
+        time_series_fig = px.line(
+            expanded_df,
+            x='SeriesDate',
+            y='HU_Value',
+            color='PatientID',
+            line_group='PatientID',
+            title='Time-Series Analysis of HU Values',
+            labels={'HU_Value': f'{HU_selected_metric} (HU)', 'SeriesDate': 'Date', 'PatientID': 'Patient ID'}
+        )
+
+        combined_fig = make_subplots(
+            rows=2, cols=1,
+            subplot_titles=(f'{HU_selected_metric} Distribution', 'Time-Series Analysis'),
+            shared_xaxes=False
+        )
+
+        # Add histogram
+        combined_fig.add_trace(
+            Histogram(x=hu_values, nbinsx=50, opacity=0.7, marker_color='blue'),
+            row=1, col=1
+        )
+
+        # Add time-series lines
+        for patient_id, group in expanded_df.groupby('PatientID'):
+            combined_fig.add_trace(
+                Scatter(
+                    x=group['SeriesDate'],
+                    y=group['HU_Value'],
+                    mode='lines',
+                    name=f'Patient {patient_id}'
+                ),
+                row=2, col=1
+            )
+
+        # Update layout
+        combined_fig.update_layout(
+            height=800,
+            title_text=f'{HU_selected_metric} Distribution and Time-Series Analysis',
+            margin=dict(l=20, r=20, t=50, b=50)
+        )
+
+        return combined_fig
+
+
     @app.callback(
     Output('patient-dropdown', 'options'),
     Input('ct-scan-data-store', 'data')
@@ -486,121 +578,169 @@ def register_callbacks(app):
     # Clustering and Segmentation callback
     @app.callback(
         Output('clustering-plot', 'figure'),
-        [Input('ct-scan-data-store', 'data'),
-        Input('hu-threshold-slider', 'value')])  
-    def update_clustering_plot(data, hu_threshold):
-        if data is None:
+        [
+            Input('ct-scan-data-store', 'data'),
+            Input('hu-metric-radio', 'value'),
+            Input('tissue-dropdown', 'value'),
+            Input('slab-dropdown', 'value'),
+            Input('hu-threshold-slider', 'value')
+        ]
+    )
+    def update_clustering_plot(data, HU_selected_metric, selected_tissues, selected_slabs, hu_threshold):
+        if data is None or not HU_selected_metric or not selected_tissues or not selected_slabs:
             return go.Figure()
 
+        # Load data into DataFrame
         df = pd.DataFrame(data)
-        df = df.infer_objects(copy=False)
 
-        # Ensure PatientID is available as a column
+        # Ensure required columns exist
         if 'PatientID' not in df.columns:
             print("PatientID column not found.")
             return go.Figure()
-        
-        # Select numeric columns for interpolation
-        numeric_columns = df.select_dtypes(include=['number']).columns
-        df[numeric_columns] = df[numeric_columns].interpolate(method='linear', inplace=False)
 
-        # Automatically detect the column containing 'HU' in the name
-        hu_columns = [col for col in df.columns if 'HU' in col]
+        # Filter columns based on dropdown selections
+        column_filter = (
+            df.columns.str.contains('|'.join(selected_tissues)) &
+            df.columns.str.contains('|'.join(selected_slabs)) &
+            df.columns.str.contains(HU_selected_metric)
+        )
+        filtered_columns = df.columns[column_filter]
 
-        if len(hu_columns) == 0:
-            return go.Figure()  # Return an empty figure if no HU columns found
+        if filtered_columns.empty:
+            print("No matching columns for the selected filters.")
+            return go.Figure()
 
-        # Use the first HU-related column for clustering
-        selected_hu_column = hu_columns[0]
+        # Extract and process the relevant data
+        filtered_data = df[filtered_columns].apply(pd.to_numeric, errors='coerce').astype(float)
 
         # Apply HU threshold range filtering
         hu_min, hu_max = hu_threshold
-        df = df[(df[selected_hu_column] >= hu_min) & (df[selected_hu_column] <= hu_max)]
+        filtered_data = filtered_data[(filtered_data >= hu_min) & (filtered_data <= hu_max)]
 
-        # Perform KMeans clustering on the HU data
-        kmeans = KMeans(n_clusters=3).fit(df[[selected_hu_column]])
-        df['Cluster'] = kmeans.labels_
+        # Drop rows with missing values
+        filtered_data.dropna(inplace=True)
 
-        # Create the clustering plot using PatientID for x-axis
+        if filtered_data.empty:
+            print("Filtered data is empty after threshold and NaN removal.")
+            return go.Figure()
+
+        # Perform KMeans clustering
+        try:
+            kmeans = KMeans(n_clusters=3, random_state=42).fit(filtered_data)
+            df['Cluster'] = kmeans.labels_
+        except Exception as e:
+            print(f"Clustering failed: {e}")
+            return go.Figure()
+
+        # Prepare data for visualization, including scans and slabs
+        cluster_plot_data = pd.DataFrame({
+            'PatientID': df['PatientID'].repeat(filtered_columns.shape[0]).reset_index(drop=True),
+            'Scan': [col.split(';')[0] for col in filtered_columns] * len(df),  # Extract scan type
+            'Slab': [col.split(';')[1] for col in filtered_columns] * len(df),  # Extract slab type
+            HU_selected_metric: filtered_data.values.flatten(),
+            'Cluster': df['Cluster'].repeat(filtered_columns.shape[0]).reset_index(drop=True)
+        })
+
+        # Create the clustering plot
         cluster_fig = px.scatter(
-            df, 
-            x='PatientID', 
-            y=selected_hu_column, 
-            color='Cluster',
-            title='Patient Segmentation & Clustering'
+            cluster_plot_data,
+            y='Scan',
+            x=HU_selected_metric,
+            color='Cluster',  
+            hover_data={'Slab': True},  
+            title='Patient Segmentation & Clustering by Scan and Slab',
+            labels={
+                'PatientID': 'Patient ID',
+                HU_selected_metric: f'{HU_selected_metric} (HU)',
+                'Scan': 'Scan Type',
+                'Cluster': 'Cluster'
+            }
         )
-        
+
+        # Update layout for better visuals
         cluster_fig.update_layout(
             margin=dict(l=20, r=20, t=50, b=50),
             height=800,
-            width=1400
+            width=1400,
+            legend_title_text='Cluster & Scan'
         )
 
         return cluster_fig
 
-
     
     @app.callback(
-        Output('vertebrae-count-plot', 'figure'),
-        [Input('ct-scan-data-store', 'data'),
+    Output('vertebrae-count-plot', 'figure'),
+    [
+        Input('ct-scan-data-store', 'data'),
         Input('slab-dropdown', 'value'),
         Input('tissue-dropdown', 'value'),
-        Input('measurement-dropdown', 'value')]
-    )
+        Input('measurement-dropdown', 'value')
+    ]
+)
     def update_vertebrae_count_plot(data, selected_slabs, selected_tissues, selected_metrics):
         if data is None or not selected_slabs or not selected_tissues or not selected_metrics:
             return go.Figure()
 
         df = pd.DataFrame(data)
 
-        # Initialize a list to store results for each slab
+        # List to store presence results
         presence_data = []
 
-        # Check if each selected slab is present with non-null values in the data
+        # Iterate over selected slabs to check presence
         for slab in selected_slabs:
             slab_present = False
             for col in df.columns:
-                col_slab, col_tissue, col_metric = parse_column_name(col)
-                # Check if this column matches selected slab, tissue, and metric
-                if (col_slab == slab and col_tissue in selected_tissues and col_metric in selected_metrics):
-                    if df[col].notnull().any():  
+                col_parts = col.split(';')  # Split column names into components (adjust if necessary)
+                if len(col_parts) < 3:
+                    continue
+                col_slab, col_tissue, col_metric = col_parts
+
+                # Match selected slab, tissue, and metric
+                if (
+                    col_slab == slab and 
+                    col_tissue in selected_tissues and 
+                    col_metric in selected_metrics
+                ):
+                    if df[col].notnull().any():  # Check if the column has non-null values
                         slab_present = True
-                        print(f"Found data for slab {slab} with tissue {col_tissue} and metric {col_metric}")
                         break
 
-            # Record presence of each slab
-            presence_data.append({'Slab': slab, 'Presence': 'Present' if slab_present else 'Not Present', 'Value': 1 })
+            # Append results for this slab
+            presence_data.append({
+                'Slab': slab,
+                'Presence': 'Present' if slab_present else 'Not Present'
+            })
 
-        # Convert presence data to DataFrame for plotting
+        # Convert presence data to a DataFrame
         presence_df = pd.DataFrame(presence_data)
 
-        print("Presence data:", presence_df)
-
-        # Create a bar plot for presence
+        # Create a bar plot for slab presence
         vertebrae_fig = px.bar(
-            data_frame=presence_df,
+            presence_df,
             x='Slab',
-            y='Presence',
+            y=[1] * len(presence_df),  
+            color='Presence',
             title='Presence of Selected Vertebra Types',
             labels={
                 'Slab': 'Vertebra Type',
-                'Presence': 'Presence Status'
+                'y': 'Presence Indicator'
             },
-            color='Presence',
-            color_discrete_map={'Present': 'green',  'Not Present': 'grey'}
+            color_discrete_map={'Present': 'green', 'Not Present': 'grey'}
         )
 
+        # Update layout
         vertebrae_fig.update_layout(
             xaxis_title='Vertebra Type',
-            yaxis_title='Presence Status',
+            yaxis_title='',  
             height=600,
             width=1400,
             xaxis={'categoryorder': 'category ascending'},
-            hovermode='x'
+            hovermode='x',
+            showlegend=True
         )
 
         return vertebrae_fig
-    
+
     @app.callback(
         Output('tissue-count-plot', 'figure'),
         [Input('ct-scan-data-store', 'data'),
@@ -723,10 +863,8 @@ def register_callbacks(app):
 
             slice_info['slice_type'] = slice_col
             
-            # Filter out rows where 'num_slices' is zero
             slice_info = slice_info[slice_info['num_slices'] > 0]
 
-            # Append this slice's data to the overall slice data
             slice_data = pd.concat([slice_data, slice_info], ignore_index=True)
 
         # Sort by Patient ID and Gender for better visualization
