@@ -180,7 +180,7 @@ ct_scan_layout = html.Div([
     html.Div(id='file-info', style={'margin-top': '20px'}),
     dcc.Tabs([
         
-        dcc.Tab(label='HU Distribution Patterns', children=[
+        dcc.Tab(label='Data Preview', children=[
             # Data Preview Area
             html.Div([
                 html.H3("Uploaded Data Preview", style={'text-align': 'center'}),
@@ -195,7 +195,7 @@ ct_scan_layout = html.Div([
     ]),
 
         ]),
-        dcc.Tab(label='Time-Series Analysis', children=[
+        dcc.Tab(label='HU distribution and Time-Series Analysis', children=[
             html.Div([
                 html.H3("Time-Series Analysis of HU Values", style={'text-align': 'center'}),
                 dcc.Graph(id='time-series-plot')
@@ -227,15 +227,17 @@ ct_scan_layout = html.Div([
                dcc.Graph(id='tissue-count-plot')
                ])
         ]),
-         dcc.Tab(label='Slices per Patient', children=[
+         dcc.Tab(label='Slices thickness and Gender', children=[
             html.Div([
-               html.H3("Slices per Patient", style={'text-align': 'center'}),
-               dcc.Graph(id='gender-slices-plot')
+               html.H3("Avg Slice thickenss for scan types per patient", style={'text-align': 'center'}),
+               dcc.Graph(id='gender-slices-plot'),
+               dcc.Graph(id='gender-slices-line')      
+    ])
                ])
         ]),
       
     ])
-])
+
 
 def parse_file(contents, filename):
     content_type, content_string = contents.split(',')
@@ -326,7 +328,7 @@ def register_callbacks(app):
         columns = [{'name': col, 'id': col} for col in df.columns]
 
         # Return the first 10 rows of the DataFrame as a list of dictionaries
-        return df.to_dict('records'), columns
+        return df.head(10).to_dict('records'), columns
 
 
     # Heatmap & Distribution Plot callback
@@ -647,7 +649,7 @@ def register_callbacks(app):
             y='Scan',
             x=HU_selected_metric,
             color='Cluster',  
-            hover_data={'Slab': True},  
+            hover_data={'Slab': True, 'PatientID': True},  
             title='Patient Segmentation & Clustering by Scan and Slab',
             labels={
                 'PatientID': 'Patient ID',
@@ -816,90 +818,86 @@ def register_callbacks(app):
 
         return fig
 
-        
+
     @app.callback(
-    Output('gender-slices-plot', 'figure'),
-    Input('ct-scan-data-store', 'data'))
+    [Output('gender-slices-plot', 'figure'), Output('gender-slices-line', 'figure')], 
+    Input('ct-scan-data-store', 'data')
+)
     def update_gender_slices_plot(data):
         if data is None:
-            return go.Figure()
+            return go.Figure(), go.Figure()
 
+        # Convert data to a Pandas DataFrame
         df = pd.DataFrame(data)
-        if df is None:
-            return go.Figure()
 
-        # Find all columns that contain 'num_slices' in their names
-        num_slices_cols = [col for col in df.columns if 'num_slices' in col]
-        
-        # Find slice thickness column (in your case it's 'height_mm')
-        height_mm_cols = [col for col in df.columns if 'height_mm' in col]
-
-        # If no such columns are found, return an empty figure
-        if len(num_slices_cols) == 0:
-            print("No column found with 'num_slices' in its name.")
-            return go.Figure()
-
-        # Convert all num_slices and height_mm columns to numeric, filling NaNs with 0
-        df[num_slices_cols] = df[num_slices_cols].apply(pd.to_numeric, errors='coerce').fillna(0)
-        df[height_mm_cols] = df[height_mm_cols].apply(pd.to_numeric, errors='coerce').fillna(0)
-
+        # Check if required columns are available
         if 'PatientSex' not in df.columns or 'PatientID' not in df.columns:
-            print("Missing 'PatientSex' or 'PatientID' columns.")
-            return go.Figure()
+            print("Missing required columns: 'PatientSex' or 'PatientID'")
+            return go.Figure(), go.Figure()
 
-        # For each slice, we want to have an individual record
-        slice_data = pd.DataFrame()
+        # Extract all columns containing slab and slice data (assumes naming convention like 'slab_type;height_mm')
+        slab_height_cols = [col for col in df.columns if ';height_mm' in col]
 
-        # Iterate through each slice column
-        for slice_col in num_slices_cols:
-            # Create a new dataframe with individual slice info
-            slice_info = df[['PatientSex', 'PatientID']].copy()
-            slice_info['num_slices'] = df[slice_col]
-            
-            if len(height_mm_cols) > 0:
-                slice_info['height_mm'] = df[height_mm_cols[0]]
-            else:
-                slice_info['height_mm'] = np.nan
+        # If no matching columns are found, return an empty figure
+        if not slab_height_cols:
+            print("No columns found with ';height_mm' in their names.")
+            return go.Figure(), go.Figure()
 
-            slice_info['slice_type'] = slice_col
-            
-            slice_info = slice_info[slice_info['num_slices'] > 0]
+        # Reshape the DataFrame to have 'slice_type', 'height_mm', and other details in rows
+        slice_data = pd.melt(
+            df,
+            id_vars=['PatientSex', 'PatientID'],  # Non-variable columns
+            value_vars=slab_height_cols,         # Columns to unpivot
+            var_name='slice_type',               # New column name for the slab type
+            value_name='height_mm'               # New column name for the slice height
+        )
 
-            slice_data = pd.concat([slice_data, slice_info], ignore_index=True)
+        # Remove rows with missing or zero height_mm values
+        slice_data = slice_data[slice_data['height_mm'] > 0]
 
-        # Sort by Patient ID and Gender for better visualization
-        slice_data = slice_data.sort_values(by=['PatientID', 'PatientSex'])
+        # Sort the data for better visualization
+        slice_data = slice_data.sort_values(by=['PatientID', 'slice_type'])
 
-        # Assuming 'PatientSex' and other fields are available
-        slice_data_fig = px.bar(
-            data_frame=slice_data,
-            x='slice_type',  
-            y='height_mm', 
-            color='PatientSex', 
-            hover_data=['num_slices', 'PatientID'],
-            title='Slice Thickness and Volume per Slab',
+        line_chart = px.scatter(
+            slice_data,
+            x="slice_type",       # Slab type on the x-axis
+            y="height_mm",        # Slice thickness on the y-axis
+            color="PatientID",    # Different colors for each Patient ID
+            facet_col="PatientSex",  # Separate plots for each gender
+            title="Slice Thickness by Slab Type, Patient ID, and Gender",
             labels={
-                'height_mm': 'Slice Thickness (mm)',
-                'num_slices': 'Number of Slices',
-                'PatientSex': 'PatientSex',
-                'PatientID': 'Patient ID',
-                'slice_type': 'Slab'
-            },
-            barmode='group'
+                "height_mm": "Slice Thickness (mm)",
+                "slice_type": "Slab Type",
+            }
         )
 
-        slice_data_fig.update_traces(
-            hovertemplate="<b>Slab:</b> %{x}<br>" +
-                        "<b>Slice Thickness:</b> %{y} (mm)<br>" +
-                        "<b>Number of Slices:</b> %{customdata[0]}<br>" +
-                        "<b>Patient ID:</b> %{customdata[1]}<br>"
-        )
-        slice_data_fig.update_layout(
-            xaxis_title='Slab',
-            yaxis_title='Slice Thickness',
-            autosize=True,
+        line_chart.update_layout(
+            xaxis_title="Slab Type",
+            yaxis_title="Slice Thickness (mm)",
             height=800,
-            width=1200
+            width=1400,
+            legend_title="Patient ID",
+            showlegend=True
         )
 
-        return slice_data_fig
+        # Add histogram data for detailed distribution analysis (optional)
+        histogram_data = []
+        for patient_id in slice_data['PatientID'].unique():
+            patient_data = slice_data[slice_data['PatientID'] == patient_id]
+        
+            histogram = go.Histogram(
+                x=patient_data['slice_type'],  # Slab type
+                y=patient_data['height_mm'],  # Slice thickness
+                name=f'Patient {patient_id}',  # Label for each patient
+                hovertext=patient_data,  # Hover info
+                histfunc='avg',  # Average thickness for each slab
+                textposition='outside',
+                marker=dict(opacity=0.75)
+            )
+            histogram_data.append(histogram)
+
+        # Create a histogram figure
+        histogram_fig = go.Figure(data=histogram_data)
+
+        # Combine both visuals into a final figure (use bar_chart by default)
+        return histogram_fig , line_chart

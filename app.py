@@ -1,5 +1,5 @@
 import dash
-from dash import dcc, html, Input, Output
+from dash import dcc, html, Input, Output, State
 from flask_caching import Cache
 import requests
 import os
@@ -19,14 +19,14 @@ cache = Cache(app.server, config={
 })
 
 # Environment variable for LLM API URL
-LLM_API_URL = os.getenv("LLM_API_URL", "http://127.0.0.1:8000/generate")
+LLM_API_URL = os.getenv("LLM_API_URL", "http://127.0.0.1:8000/ask/")
 
 # Main layout with dcc.Store initialized only once
 app.layout = html.Div([
     dcc.Store(id='ct-scan-data-store', storage_type='memory'),  # Global store, available across all tabs
     dcc.Tabs(id='tabs', value='ct-scan-tab', children=[
         dcc.Tab(label='CT Scan HU Analysis', value='ct-scan-tab'),
-        dcc.Tab(label='Machine Learning - Clustering', value='ml-tab'),
+        dcc.Tab(label='Machine Learning', value='ml-tab'),
         dcc.Tab(label='LLM Assistant', value='llm-tab')  # New tab for the LLM Assistant
     ]),
     html.Div(id='tabs-content'),
@@ -48,6 +48,7 @@ def render_content(tab):
                 dcc.Input(
                     id='llm-prompt', 
                     type='text', 
+                    debounce=True,
                     placeholder="Enter your query...",
                     style={'width': '80%', 'padding': '10px', 'margin-right': '10px'}
                 ),
@@ -72,24 +73,32 @@ def clear_cache(n_clicks):
 
 # Callback to interact with LLM API
 @app.callback(
-    Output('llm-response', 'children'),
-    [Input('llm-submit-btn', 'n_clicks'), Input('llm-prompt', 'value')]
+    [Output('llm-response', 'children'), Output('llm-prompt', 'value')],  # Clear input field
+    [Input('llm-submit-btn', 'n_clicks')],
+    [State('llm-prompt', 'value')]
 )
 def update_llm_response(n_clicks, prompt):
     if n_clicks > 0 and prompt:
         try:
-            # Send a request to the FastAPI server
-            response = requests.post(LLM_API_URL, json={"prompt": prompt})
+            prompt = prompt.strip()
+            if len(prompt) < 5:
+                return "Please enter a more detailed question.", ""  # Clear input
+            
+            print(f"Sending prompt: {prompt}")
+            response = requests.post(LLM_API_URL, json={"question": prompt})
+            
             if response.status_code == 200:
                 response_data = response.json()
-                return response_data.get("response", "No response from LLM.")
+                print(f"Response received: {response_data}")
+                return response_data.get("answer", "No response from LLM."), ""  # Clear input
             else:
-                return f"Error: LLM API returned status code {response.status_code}."
+                return f"Error: LLM API returned status code {response.status_code}.", ""
         except requests.exceptions.ConnectionError:
-            return "Error: Unable to connect to the LLM server. Ensure it is running."
+            return "Error: Unable to connect to the LLM server. Ensure it is running.", ""
         except Exception as e:
-            return f"Error: {e}"
-    return "Enter a prompt and click 'Get Response'."
+            return f"Error: {e}", ""
+    return "Enter a prompt and click 'Get Response'.", ""
+
 
 # Register callbacks for the CT Scan Dashboard and ML dashboard
 register_callbacks(app)
